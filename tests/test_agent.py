@@ -26,6 +26,20 @@ def test_search_rules_filters_by_keyword():
     assert "PRICE-02" in ids
 
 
+def test_rules_knowledge_base_is_enriched():
+    from ecomrisk.data import RULES
+    ids = {r["id"] for r in RULES}
+    assert len(RULES) >= 20
+    assert {"ADDR-01", "PRICE-01", "TEXT-01", "GROUP-01", "ORDER-01"} <= ids
+
+
+def test_search_rules_maps_evidence_keywords():
+    _, _, _, tools = _setup()
+    assert any(r["id"].startswith("PRICE") for r in tools.search_rules("异常低价商品占比 70%"))
+    assert any(r["id"].startswith("TEXT") for r in tools.search_rules("灌水标题占比 50%"))
+    assert any(r["id"].startswith("GROUP") for r in tools.search_rules("疑似团伙聚集"))
+
+
 def test_deterministic_policy_maps_score_to_level():
     _, _, report, tools = _setup(seed=11, n=100)
     policy = DeterministicPolicy()

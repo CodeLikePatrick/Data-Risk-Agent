@@ -41,7 +41,12 @@ class ToolRegistry:
 
     def search_rules(self, query: str) -> list[dict]:
         q = query or ""
-        return [r for r in RULES if r["title"] in q or r["title"][:2] in q or q in r["title"]]
+        keywords = ["地址", "坐标", "门址", "价格", "低价", "标题", "关键词", "模板", "评价", "文案",
+                    "团伙", "聚集", "设备", "注册", "账号", "联系人", "刷单", "退款", "订单", "发货"]
+        keys = [k for k in keywords if k in q]
+        if not keys:
+            keys = [q]
+        return [r for r in RULES if any(k in r["title"] for k in keys)]
 
     def create_case(self, merchant_id: str, action: str, reason: str) -> dict:
         return {"case_id": f"CASE-{abs(hash(merchant_id + action)) % 100000:05d}", "merchant_id": merchant_id, "action": action, "reason": reason}
