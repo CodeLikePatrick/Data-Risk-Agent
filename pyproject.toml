@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ecom-risk-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "E-commerce risk detection engine and LLM review agent"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -14,7 +14,9 @@ keywords = ["e-commerce", "risk-control", "fraud-detection", "llm-agent", "rag"]
 dependencies = ["numpy", "pandas"]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "scikit-learn"]
+models = ["lightgbm"]
+viz = ["matplotlib"]
 
 [tool.setuptools]
 packages = ["ecomrisk"]
