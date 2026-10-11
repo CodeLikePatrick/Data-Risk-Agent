@@ -1,133 +1,133 @@
-# E-commerce Risk Intelligence
+# ecom-risk-agent
 
-[English](README_EN.md)
+![Python](https://img.shields.io/badge/python-3.9%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-一个面向电商场景的**风控研判 Agent + 异常检测引擎**：底层用「规则 + 逻辑回归」两阶段识别地址、价格、文本、团伙四类风险，上层用 Agent 自动完成「查风险 → 查规则 → 看商品 → 给处置建议 → 建工单」的研判闭环，并附一套可复现的评测。
+An e-commerce risk intelligence pipeline: a two-stage detection engine that turns
+raw merchant and product data into an interpretable risk score, and an LLM review
+agent that turns the score into a defensible, human-reviewable decision.
 
-项目定位不是「会调大模型」，而是**把风控里的 precision / recall / 误杀率思维带进 Agent，做成可评测、可解释、可回滚的研判流水线**。
+The core is deliberately dependency-free (numpy and pandas only). Every model,
+metric and clustering step is implemented from scratch so the numbers are
+auditable and the trade-offs are explicit.
 
-## 背景与动机
+## Why this exists
 
-电商风控有两条主线：一是**异常检测**（发现风险），二是**策略与处置**（定义风险、召回、识别、处置）。传统做法把规则写死在代码里，出了问题很难解释和迭代；大模型能做语义理解，但直接拿来做判定会不可控、不可评测。
+Risk decisions usually fail in one of two expensive ways: blocking an innocent
+merchant, or letting a genuinely risky one through. Rules are precise but miss
+weak signals; a black-box model finds more cases but is hard to explain and even
+harder to defend. An LLM alone can reason about evidence but is not deterministic
+or easy to evaluate.
 
-这个项目把两者接起来：检测引擎产出结构化的风险信号和证据，Agent 负责把信号翻译成**带依据的处置结论**。
+This project combines the three ideas instead of choosing between them: rules
+provide a precise, explainable first pass; a statistical model generalises beyond
+the rules; and an agent uses both, with a tool registry that keeps the model away
+from raw data, a deterministic offline policy for reproducible evaluation, and a
+human-in-the-loop gate for the decisions that matter.
 
-## 系统架构
+## Architecture
 
-```
-                    ┌──────────────────────────────┐
-  商品 / 地址 / 店铺  │  异常检测引擎（detect.py）      │
-  ────────────────► │  特征 → 规则初筛 → 模型细筛       │
-                    │  输出：risk_score + evidence    │
-                    └──────────────┬───────────────┘
-                                   ▼
-                    ┌──────────────────────────────┐
-                    │  风控研判 Agent（agent.py）      │
-                    │  ReAct：查风险 → 查规则 → 看商品   │
-                    │  → 给处置建议 → 建工单            │
-                    └──────────────────────────────┘
-                                   ▼
-                         结构化结论 + 证据 + 置信度
-```
-
-## 四类风险
-
-- 地址真实性：地址无法解析，或城市/区县与坐标不一致
-- 价格异常：价格偏离同品类中位数 3 倍标准差以上，或明显低于成本线
-- 文本灌水：标题模板化、关键词堆砌、字符信息熵过低
-- 团伙聚集：多个店铺共享设备、地址或联系人
-
-## 目录结构
-
-```
-ecomrisk/
-  data.py      合成数据生成 + 规则知识库
-  engine.py    特征工程 + 两阶段打分 + 检测编排
-  agent.py     工具注册表 + ReAct 循环 + 确定性策略 + OpenAI 兼容客户端
-  eval.py      引擎与 Agent 的评测指标
-main.py        端到端演示入口
-data/rules.md  可直接检索的风控规则知识库
+```text
+  merchants + products
+          |
+          v
+  feature engineering            engine.py / features.py / sql/features.sql
+          |
+          v
+  two-stage detection            rule_score -> logistic regression -> risk_score
+          |
+          v
+  review agent (ReAct)           query report -> search rules -> inspect sample
+          |                        -> recommend action -> create case
+          v
+  human-in-the-loop gate         review.py
 ```
 
-## 快速开始
+## What is included
+
+- **Feature engineering** for six interpretable risk signals, with an in-memory
+  implementation and a matching Hive-style SQL version.
+- **Two-stage detection**: a weighted rule score for precision plus a logistic
+  regression trained from scratch for recall.
+- **Model comparison**: five-fold out-of-fold AUC for the interpretable baseline
+  versus a gradient-boosted challenger (LightGBM first, scikit-learn as fallback,
+  both optional).
+- **Clustering**: numpy K-Means and DBSCAN for merchant segmentation, with a
+  silhouette score and a noise label that flags unusual merchants.
+- **Market-basket analysis**: Apriori and association rules with support,
+  confidence and lift.
+- **Evaluation**: confusion-matrix metrics, ROC/AUC, KS, lift and gain tables,
+  and regression error metrics, all implemented from scratch.
+- **Review agent**: a tool registry, a ReAct loop, an OpenAI-compatible client,
+  and a deterministic policy that runs the same tool sequence offline.
+- **Human-in-the-loop**: a review gate that routes high and borderline scores to
+  a human and merges the decisions back.
+- **A sample report** and a **Streamlit dashboard** for presenting the result.
+
+## Quick start
 
 ```bash
+git clone <your-fork>
 cd ecom-risk-agent
-python main.py
+pip install -e ".[dev,models,viz]"
+python examples/run_pipeline.py
 ```
 
-只需 `numpy` 和 `pandas`，无其他依赖。`main.py` 会生成数据、跑检测、跑 Agent、打印评测指标和两个样例的完整研判结论。
-
-## 方法
-
-### 特征工程
-
-从原始商品和地址数据聚合出 6 个可解释特征：地址造假、地址与坐标矛盾、价格最大 z-score、异常低价商品占比、灌水标题占比、团伙标志。
-
-### 两阶段检测
-
-1. **规则初筛**：按业务规则给可解释的 `rule_score`，先保证「判一个准一个」。
-2. **模型细筛**：用 numpy 手写的逻辑回归在特征上学习，输出 `model_prob`，补充规则覆盖不到的弱信号。
-3. 最终 `risk_score = 0.55 * rule_score + 0.45 * model_prob`。
-
-模型是刻意从零实现的，没有调 sklearn：一方面保证零依赖，另一方面把梯度下降和归一化这些细节放在明面上，体现对模型内部机制的理解。
-
-### Agent 设计
-
-Agent 走 ReAct 循环，每个工具都有明确的输入输出：
-
-- `query_risk_report`：读取某个商家的风险分与证据
-- `search_rules`：从规则知识库检索对应规则
-- `lookup_product`：抽一个商品样本做佐证
-- `create_case`：生成处置工单
-
-最终输出结构化结论：风险等级、违规类型、置信度、证据、处置动作、解释。
-
-为了能离线复现和评测，内置一个 `DeterministicPolicy`，它走和真实 Agent 完全相同的工具序列；配置 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL` 后，`run_react` 会切到真实大模型。
-
-### 评测
-
-合成数据自带真实标签，所以能算 precision、recall、F1 和误杀率，而不是「看起来能跑」。
-
-当前在固定随机种子上：
-
-| 指标 | 检测引擎 | 研判 Agent |
-| --- | --- | --- |
-| precision | 1.00 | 1.00 |
-| recall | 0.59 | 0.59 |
-| f1 | 0.74 | 0.74 |
-| false positive rate | 0.00 | 0.00 |
-| 高危判定证据完备率 | - | 1.00 |
-
-这是一个**偏保守**的策略：precision 高、误杀率低，代价是 recall 偏低。实际落地时可以通过降低阈值、增加模型权重、加入更多弱特征来提高召回，这是一组值得权衡的取舍。
-
-## Tests
+To exercise the real LLM path, set `OPENAI_BASE_URL`, `OPENAI_API_KEY` and
+`OPENAI_MODEL` (any OpenAI-compatible endpoint works) and run:
 
 ```bash
-pip install -e ".[dev]"
-pytest -q
+python examples/run_review.py
 ```
 
-共 21 条用例，按模块覆盖四层：
+Run the test suite with pytest, or without any extra dependency:
 
-- 数据生成：可复现性、标签一致性、商品与商家的关联、地址造假标记与违规类型一致
-- 检测引擎：特征取值范围、坐标矛盾检测、规则分边界、逻辑回归收敛、检测结果可复现
-- 研判 Agent：工具返回结构、规则检索、风险等级映射、ReAct 循环、未给出最终结论时的异常终止
-- 评测指标：precision / recall / F1 / 误杀率的计算与边界
-
-GitHub Actions 在每次 push 与 pull request 时自动运行 `pytest -q`。
-
-## 接入真实大模型
-
-```python
-from ecomrisk.agent import OpenAICompatLLM, run_react
-
-llm = OpenAICompatLLM()  # 读取 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL
-verdict = run_react(llm, tools, "M0000")
+```bash
+pytest -q                 # if pytest is installed
+python tests/run_tests.py # dependency-free runner
 ```
 
-兼容所有 OpenAI 协议的服务（含 DeepSeek、OpenRouter 等）。
+## Example output (synthetic benchmark)
 
-## 免责声明
+The benchmark dataset has injected risk labels, so every number below is exact
+and reproducible.
 
-数据为合成数据，仅用于展示方法与工程能力；规则与指标不代表任何真实平台的风控标准。
+| Layer | Precision | Recall | F1 | False-positive rate |
+| --- | --- | --- | --- | --- |
+| Detection engine | 1.00 | 0.59 | 0.74 | 0.00 |
+| Review agent (deterministic) | 1.00 | 0.59 | 0.74 | 0.00 |
+
+Ranking quality on the same run: AUC 0.95, KS 0.88, and the top decile alone
+captures 36% of all risky merchants at a lift of 3.6.
+
+## Repository layout
+
+```text
+ecomrisk/            package
+sql/                 Hive-style profiling and feature SQL
+notebooks/           EDA and model-evaluation notebooks
+dashboard/           Streamlit app
+reports/             generated sample report
+examples/            runnable entry points
+tests/               pytest-compatible tests + dependency-free runner
+docs/                architecture, evaluation, decisions
+data/                data dictionary and a small committed sample
+```
+
+## Human-in-the-loop
+
+Clear predictions are auto-approved. Scores above the mandatory-review cutoff and
+scores in the band around the decision threshold are queued for a human, who can
+confirm or override. Un-reviewed borderline items are held safe until someone
+acts. This makes the cost of review explicit: time spent reviewing versus the cost
+of the two errors it prevents.
+
+## Notes
+
+The data is synthetic and exists only to make the benchmark reproducible and the
+labels exact. It does not represent any real platform, customer or policy. The
+rules and metrics illustrate a method, not a production risk standard.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
